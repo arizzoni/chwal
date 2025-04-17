@@ -1,0 +1,50 @@
+#!/usr/bin/sh
+
+_check_command() {
+	if ! command -v "$1" > /dev/null 2>&1; then
+		echo "Error: Required program $1 not found."
+		exit 1
+	fi
+}
+
+# Change to the new wallpaper
+if _check_command "hyprctl" && _check_command "hyprpaper"; then
+	hyprctl hyprpaper wallpaper ",$1" > /dev/null 2>&1 \
+		&& hyprctl hyprpaper unload "$2" > /dev/null 2>&1
+fi
+
+# Zathura
+if _check_command "zathura" && _check_command "dbus-send"; then
+	ZATHURA_IDS=$(dbus-send --session \
+		--dest=org.freedesktop.DBus \
+		--type=method_call \
+		--print-reply \
+		/org/freedesktop/DBus \
+		org.freedesktop.DBus.ListNames \
+		| grep -o 'org.pwmt.zathura.PID-[0-9]*')
+	for ID in $ZATHURA_IDS; do
+		dbus-send --session \
+			--dest="$ID" \
+			--type=method_call \
+			--print-reply \
+			/org/pwmt/zathura \
+			org.pwmt.zathura.SourceConfig > /dev/null 2>&1
+	done
+fi
+
+# Send notification
+if _check_command "notify-send"; then
+	# Dunst
+	if _check_command "dunstctl"; then
+		dunstctl reload > /dev/null 2>&1
+	fi
+
+	# Notify-send
+	notify-send \
+		--app-name=chwal \
+		--urgency=low \
+		"Wallpaper Changed" \
+		"New wallpaper: $(basename "$1")"
+fi
+
+exit

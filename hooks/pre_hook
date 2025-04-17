@@ -1,0 +1,15 @@
+#!/usr/bin/sh
+
+_check_command() {
+	if ! command -v "$1" > /dev/null 2>&1; then
+		echo "Error: Required program $1 not found."
+		exit 1
+	fi
+}
+
+# Need to preload the wallpaper in Hyprland
+if _check_command "hyprctl" && _check_command "hyprpaper"; then
+	hyprctl hyprpaper preload "$1" > /dev/null 2>&1
+fi
+
+exit

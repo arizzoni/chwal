@@ -1,0 +1,205 @@
+#!/bin/sh
+# Shell utility for colorscheme and wallpaper selection with wallust.
+# Version 1.0
+#
+# Copyright (C) 2025 Alessandro Rizzoni
+# This software is licensed under the terms of the MIT License.
+
+# Check required commands
+if ! command -v wallust > /dev/null 2>&1; then
+	printf 'Error: Required program %s not found.\n' "wallust" >&2
+	exit 1
+fi
+
+# Define default directories
+WALLPAPER_DIR="/usr/share/backgrounds"
+WALLPAPER_PATH="$XDG_CACHE_HOME/wallust/path"
+RMWAL_DIR="$WALLPAPER_DIR/../rmwal"
+
+_version() {
+	printf 'Shell utility for colorscheme and wallpaper selection with wallust.\n'
+	printf 'Version 1.0\n'
+	return 0
+}
+
+_help() {
+	printf "Usage: chwal [-l] [-r] [-d DIR] [-p PRE_HOOK] [-P POST_HOOK] [-h] [-V]\n"
+	_version
+	printf "\n"
+	printf "  -d DIR        Specify the wallpaper directory\n"
+	printf "  -h            Show this help message\n"
+	printf "  -l            Pre-generate themes for images in the wallpaper directory\n"
+	printf "  -p PRE_HOOK   Specify a script to run before changing the wallpaper\n"
+	printf "  -P POST_HOOK  Specify a script to run after changing the wallpaper\n"
+	printf "  -r            Mark the current wallpaper for deletion by moving it to\n"
+	printf "                another directory\n"
+	printf "  -V            Show the version of the script\n"
+	return 0
+}
+
+_rmwal() {
+	# Mark the current wallpaper for removal
+	read -r CURRENT_WALLPAPER < "$WALLPAPER_PATH"
+	if [ -f "$WALLPAPER_PATH" ] && [ -f "$CURRENT_WALLPAPER" ]; then
+		if [ ! -d "$RMWAL_DIR" ]; then
+			mkdir "$RMWAL_DIR"
+		fi
+		mv "$CURRENT_WALLPAPER" "$RMWAL_DIR"
+	else
+		printf 'Error: No current wallpaper cached.' >&2
+		return 1
+	fi
+	return 0
+}
+
+_ldwal() {
+	# Pre-generate themes for the images in the given directory in parallel
+	find "$WALLPAPER_DIR" -type f | while read -r file; do
+		exec wallust run --quiet --skip-sequences --skip-templates "$file" &
+	done
+	return 0
+}
+
+_pre_hook() {
+	if [ -n "$PRE_HOOK" ] && [ -x "$PRE_HOOK" ]; then
+		"$PRE_HOOK" "$1" "$2"
+	fi
+	return 0
+}
+
+_post_hook() {
+	if [ -n "$POST_HOOK" ] && [ -x "$POST_HOOK" ]; then
+		"$POST_HOOK" "$1" "$2"
+	fi
+	return 0
+}
+
+_new_wallpaper() {
+	tmpfile=$(mktemp)
+
+	count=0
+	# Run find and redirect its output into the while loop
+	find "$WALLPAPER_DIR" -type f > "$tmpfile"
+
+	# Now read the file line-by-line and count
+	while IFS= read -r line; do
+		count=$((count + 1))
+	done < "$tmpfile"
+
+	if [ "$count" -eq 0 ]; then
+		printf 'No files found in the wallpaper directory.\n' >&2
+		rm -f "$tmpfile"
+		return 1
+	fi
+
+	random_index=$((($(date +%s) % count) + 1))
+
+	# Select the random file by line number
+	lineno=0
+	while IFS= read -r line; do
+		lineno=$((lineno + 1))
+		if [ "$lineno" -eq "$random_index" ]; then
+			printf '%s\n' "$line"
+			break
+		fi
+	done < "$tmpfile"
+
+	rm -f "$tmpfile"
+	return 0
+}
+
+_chwal() {
+	OLD_WALLPAPER=""
+	if [ -f "$WALLPAPER_PATH" ]; then
+		read -r OLD_WALLPAPER < "$WALLPAPER_PATH"
+	fi
+
+	# Exclude the current wallpaper's full path from selection
+	NEW_WALLPAPER=$(_new_wallpaper)
+
+	_pre_hook "$NEW_WALLPAPER" "$OLD_WALLPAPER"
+
+	# Generate the themes
+	wallust run --quiet "$NEW_WALLPAPER" \
+		&&
+		# Cache the wallpaper
+		printf '%s' "$NEW_WALLPAPER" > "$WALLPAPER_PATH"
+
+	_post_hook "$NEW_WALLPAPER" "$OLD_WALLPAPER"
+
+	return 0
+}
+
+# Initialize flags
+SHOW_VERSION=0
+SHOW_HELP=0
+RUN_LDWAL=0
+RUN_RMWAL=0
+
+# Process args
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-d | --dir | --directory)
+			WALLPAPER_DIR="$2"
+			shift 2
+			;;
+		-h | --help)
+			SHOW_HELP=1
+			shift
+			;;
+		-l | --load)
+			RUN_LDWAL=1
+			shift
+			;;
+		-r | --remove)
+			RUN_RMWAL=1
+			shift
+			;;
+		-V | --version)
+			SHOW_VERSION=1
+			shift
+			;;
+		-p | --pre | --pre-hook)
+			PRE_HOOK="$2"
+			shift 2
+			;;
+		-P | --post | --post-hook)
+			POST_HOOK="$2"
+			shift 2
+			;;
+		*)
+			printf "Error: Invalid option %s\n" "$1" >&2
+			_help
+			exit 2
+			;;
+	esac
+done
+
+if [ "$SHOW_HELP" -eq 1 ]; then
+	_help
+fi
+
+if [ "$SHOW_VERSION" -eq 1 ]; then
+	_version
+fi
+
+# Check if wallpaper directory exists, if not abort
+if [ ! -d "$WALLPAPER_DIR" ]; then
+	printf 'Error: Wallpaper directory %s does not exist.' "$WALLPAPER_DIR" >&2
+	exit 1
+fi
+
+if [ "$RUN_LDWAL" -eq 1 ]; then
+	_ldwal
+fi
+
+if [ "$RUN_RMWAL" -eq 1 ]; then
+	_rmwal
+fi
+
+if [ "$SHOW_HELP" -eq 0 ] && [ "$SHOW_VERSION" -eq 0 ] \
+	&& [ "$RUN_LDWAL" -eq 0 ] && [ "$RUN_RMWAL" -eq 0 ]; then
+	_chwal
+fi
+
+exit 0
