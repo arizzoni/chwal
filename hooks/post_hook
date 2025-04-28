@@ -11,6 +11,7 @@ _check_command() {
 if _check_command "hyprctl" && _check_command "hyprpaper"; then
 	hyprctl hyprpaper wallpaper ",$1" > /dev/null 2>&1 \
 		&& hyprctl hyprpaper unload "$2" > /dev/null 2>&1
+	ln -s -f "$1" "$HOME/.cache/wallust/wal"
 fi
 
 # Zathura
