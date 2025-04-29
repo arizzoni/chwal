@@ -19,7 +19,7 @@ MANPAGE := chwal.1
 MAKE_DEPS := shellcheck checkbashisms
 SCRIPT_DEPS := wallust
 
-all: info ## Show the help message by default
+all: help ## Show the help message by default
 
 check: ## Check all dependencies
 	@errors=0
@@ -46,7 +46,7 @@ check: ## Check all dependencies
 clean: ## Remove generated files
 	@rm -f chwal.1
 
-info: ## Show the help message
+help: ## Show the help message
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Available targets:"
@@ -96,14 +96,11 @@ chwal.1: $(SCRIPT) Makefile
 	@printf ".SH LICENSE\n" >> chwal.1
 	@cat './LICENSE' >> chwal.1
 
-README.md: chwal.1
-	@if command -v nroff >/dev/null 2>&1; then nroff chwal.1 > README.md; fi
-
-man: chwal.1 README.md ## Generate manpage
+man: chwal.1 ## Generate manpage
 
 uninstall: ## Uninstall script, completions, and manpage
 	rm -f $(BINDIR)/chwal
 	rm -f $(MANDIR)/chwal.1
 	rm -f $(COMPDIR_BASH)/chwal
 
-.PHONY: check clean info install man uninstall
+.PHONY: check clean help install man uninstall

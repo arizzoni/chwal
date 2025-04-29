@@ -5,76 +5,16 @@
 # Copyright (C) 2025 Alessandro Rizzoni
 # This software is licensed under the terms of the MIT License.
 
-# TO-DO: split _chwal function into:
-#       get current wallpaper
-#       pick new wallpaper
-#       apply wallpaper
-#               pre hook
-#               post hook
-#       cache wallpaper
-
-# TO-DO: split _chwal_mkwal function into:
-#       get current wallpaper
-#       mark wallpaper
-
-# TO-DO: split _chwal_new_wallpaper
-#       get/list wallpapers > file list
-#       select random wallpaper < file list
-
-# TO-DO: split main function into
-#       check requirements function
-#       parse args "$@"
-#       dispatch (decide what to do based on flags or arguments)
-
-# TO-DO: refactor hook logic into
-#       _chwal_run_hook "$HOOK_PATH" "$NEW" "$OLD"
-
-# _chwal_chwal() {
-#     OLD_WALLPAPER=$(_chwal_get_current_wallpaper)
-#     NEW_WALLPAPER=$(_chwal_pick_wallpaper) || return 1
-#
-#     _chwal_pre_hook "$NEW_WALLPAPER" "$OLD_WALLPAPER"
-#
-#     if _chwal_apply_wallpaper "$NEW_WALLPAPER"; then
-#         _chwal_cache_wallpaper "$NEW_WALLPAPER"
-#     else
-#         printf 'Failed to apply wallpaper: %s\n' "$NEW_WALLPAPER" >&2
-#         return 1
-#     fi
-#     _chwal_post_hook "$NEW_WALLPAPER" "$OLD_WALLPAPER"
-#     return 0
-# }
-
-#------------------------------------------------------------------------------#
-
-# CORE LOGIC
-# _chwal_get_current_wallpaper
-# _chwal_pick_wallpaper
-# _chwal_apply_wallpaper
-# _chwal_cache_wallpaper
-# _chwal_run_hook
-
-# USER INTERFACE
-# _chwal_main       # Entry point
-# _chwal_chwal      # Full workflow (pre, run, post)
-# _chwal_mkwal      # Mark current wallpaper
-# _chwal_ldwal      # Preload wallpapers with wallust
-
-# SETUP & VALIDATION
-# _chwal_check_requirements
-# _chwal_parse_args "$@"
-# _chwal_dispatch
-
+# Function to print the version information
 _chwal_version() {
-    printf 'Shell utility for colorscheme and wallpaper selection with wallust.\n'
+    printf \
+        'Shell utility for colorscheme and wallpaper selection with wallust.\n'
     printf 'Version 1.1\n'
-    return 0
 }
 
+# Function to display usage instructions for the script
 _chwal_help() {
-    _chwal_version
     cat << EOF
-
 Usage: chwal [OPTIONS]
 
 Options:
@@ -85,212 +25,326 @@ Options:
   -P, --post POST_HOOK  Specify a script to run after changing the wallpaper
   -m, --mark            Mark the current wallpaper
   -V, --version         Show the version of the script
-
 EOF
-    return 0
 }
 
-_chwal_mkwal() {
-    # Mark the current wallpaper for removal
-    if [ -f "$WALLPAPER_PATH" ]; then
-        printf '%s\n' "$WALLPAPER_PATH" >> "$MKWAL_FILE"
+# Function for handling errors and printing an error message
+_chwal_error() {
+    # The error message to display
+    message="$1"
+    # The exit code, defaulting to 1 if not specified
+    code="${2:-1}"
+    # Return the error code
+    printf "Error: %s\n" "$message" >&2
+    return "$code"
+}
+
+# Function to mark the current wallpaper
+_chwal_mark_wallpaper() {
+    # The wallpaper to mark
+    CURRENT_WALLPAPER="$1"
+    # Check if a custom file is provided for marking the wallpaper
+    if [ -n "$2" ] && [ -s "$2" ]; then
+        MKWAL_FILE="$2"
     else
-        printf 'Error: No current wallpaper cached.' >&2
-        return 1
+        # Default to the cache directory if no custom file is provided
+        CHWAL_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/chwal"
+        # Ensure cache directory exists
+        mkdir -p "$CHWAL_CACHE_HOME"
+        # Default mark file
+        MKWAL_FILE="$CHWAL_CACHE_HOME/marks.txt"
     fi
-    return 0
+
+    # Ensure the current wallpaper is provided before marking
+    if [ -n "$CURRENT_WALLPAPER" ]; then
+        # Append the wallpaper path to the file
+        printf '%s\n' "$CURRENT_WALLPAPER" >> "$MKWAL_FILE"
+    else
+        # Error if wallpaper is not set
+        _chwal_error \
+            "current wallpaper could not be determined from $WALLPAPER_PATH" '2'
+    fi
 }
 
-_chwal_ldwal() {
+# Function to pre-cache wallpapers in parallel, using a max job limit
+_chwal_load_wallpapers() {
     max_jobs=4
-    set -- # Use this to hold the list of PIDs
+    # Reset the positional parameters to hold the list of PIDs
+    set --
 
+    # Find and process wallpaper files
     find "$WALLPAPER_DIR" -type f | while IFS= read -r file; do
+        # Run wallust for each wallpaper file in the background
         wallust run --quiet --skip-sequences --skip-templates "$file" &
+        # Get the process ID of the background job and append to the pid list
         pid=$!
-        # this is super janky and will break if $pid is empty or malformed
-        # TODO fix this
         set -- "$@" "$pid"
 
-        # Count current jobs
+        # Count current jobs and wait for jobs if max_jobs is reached
         job_count=$#
         if [ "$job_count" -ge "$max_jobs" ]; then
-            wait "$1" # Wait for the first job to finish
-            shift     # Remove it from the list
+            # Wait for the first job to finish then remove from the pid list
+            wait "$1"
+            shift
         fi
     done
 
-    # Wait for any remaining jobs
+    # Wait for any remaining jobs to finish
     for pid; do
         wait "$pid"
     done
 }
 
-_chwal_pre_hook() {
-    if [ -n "$PRE_HOOK" ] && [ -x "$PRE_HOOK" ]; then
-        "$PRE_HOOK" "$1" "$2"
-    fi
-    return 0
-}
+# Function to randomly select a wallpaper from the specified directory
+_chwal_select_wallpaper() {
+    # Create a temporary file
+    tmpfile=$(mktemp "${TMPDIR:-/tmp}/chwal.XXXXXXXXXX")
 
-_chwal_post_hook() {
-    if [ -n "$POST_HOOK" ] && [ -x "$POST_HOOK" ]; then
-        "$POST_HOOK" "$1" "$2"
-    fi
-    return 0
-}
-
-_chwal_new_wallpaper() {
-
-    tmpfile=$(mktemp "${TMPDIR:-/tmp}/chwal.XXXXXXXXXX") || exit 1
-
-    cleanup() {
-        rm -f "$tmpfile"
-    }
-
-    trap cleanup 0
+    # Ensure cleanup happens when the script exits
+    trap 'rm -f "$tmpfile"' 0 1 2 15
 
     count=0
     selected=""
+    # Set the wallpaper directory
+    WALLPAPER_DIR="$1"
 
-    # Run find and redirect its output into the while loop
+    # Default to /usr/share/backgrounds if no directory is specified
+    if [ -z "$WALLPAPER_DIR" ]; then
+        WALLPAPER_DIR="/usr/share/backgrounds"
+    fi
+
+    # List all files in the wallpaper directory and store them in the temp file
     find "$WALLPAPER_DIR" -type f > "$tmpfile"
 
-    # Now read the file line-by-line and count
+    # Read the list of wallpapers and randomly select one
     while IFS= read -r line; do
         count=$((count + 1))
 
-        # fallback if %N unsupported
-        now=$(date +%s%N 2> /dev/null || date +%s)
+        # Generate a random number based on current time to select a wallpaper
+        now=$(date +%s)
         rand=$((now % count))
 
-        # If the random number mod count is 0, select this line
+        # Select the wallpaper if the random number mod count is 0
         if [ $((rand % count)) -eq 0 ]; then
             selected="$line"
         fi
     done < "$tmpfile"
 
+    # If no wallpaper was selected, display an error
     if [ -z "$selected" ]; then
-        printf 'No files found in the wallpaper directory.\n' >&2
-        return 1
+        _chwal_error "no files found in directory: $WALLPAPER_DIR" '2'
     fi
 
+    # Return the selected wallpaper
     printf '%s\n' "$selected"
-
-    return 0
 }
 
-_chwal_chwal() {
-    OLD_WALLPAPER=""
-    if [ -f "$WALLPAPER_PATH" ]; then
-        read -r OLD_WALLPAPER < "$WALLPAPER_PATH"
+# Function to change the wallpaper, with pre/post hooks if specified
+_chwal_change_wallpaper() {
+    # The wallpaper directory
+    WALLPAPER_DIR="$1"
+    # The currently set wallpaper
+    OLD_WALLPAPER="$2"
+    # Select a new wallpaper
+    NEW_WALLPAPER=$(_chwal_select_wallpaper "$WALLPAPER_DIR")
+
+    # Run the pre-hook script if specified
+    if [ -n "$PRE_HOOK" ]; then
+        if ! _chwal_run_hook "$PRE_HOOK" "$NEW_WALLPAPER" "$OLD_WALLPAPER"; then
+            # Error if pre-hook fails
+            _chwal_error "failed to run pre hook: $PRE_HOOK" '1'
+        fi
     fi
 
-    # Exclude the current wallpaper's full path from selection
-    NEW_WALLPAPER=$(_chwal_new_wallpaper) || return 1
+    # Apply the new wallpaper
+    if _chwal_apply_wallpaper "$NEW_WALLPAPER"; then
+        # Cache the new wallpaper
+        _chwal_cache_wallpaper "$NEW_WALLPAPER"
+    else
+        # Error if wallpaper application fails
+        _chwal_error "failed to apply wallpaper: $NEW_WALLPAPER" '1'
+    fi
 
-    _chwal_pre_hook "$NEW_WALLPAPER" "$OLD_WALLPAPER"
-
-    # Generate the themes
-    wallust run --quiet "$NEW_WALLPAPER" \
-        &&
-        # Cache the wallpaper
-        printf '%s' "$NEW_WALLPAPER" > "$WALLPAPER_PATH"
-
-    _chwal_post_hook "$NEW_WALLPAPER" "$OLD_WALLPAPER"
-
-    return 0
+    # Run the post-hook script if specified
+    if [ -n "$POST_HOOK" ]; then
+        if ! _chwal_run_hook "$POST_HOOK" "$NEW_WALLPAPER" "$OLD_WALLPAPER"; then
+            # Error if post-hook fails
+            _chwal_error "failed to run post hook: $POST_HOOK" '1'
+        fi
+    fi
 }
 
-_chwal_main() {
-    # Check required commands
+# Function to apply a wallpaper using wallust
+_chwal_apply_wallpaper() {
+    # Try to apply the wallpaper
+    wallust run --quiet "$1" && return 0 || return 1
+}
+
+# Function to cache the currently set wallpaper
+_chwal_cache_wallpaper() {
+    # The wallpaper path to cache
+    WALLPAPER_PATH="$1"
+
+    # Check if a custom cache file is provided
+    if [ -n "$2" ]; then
+        # Save to the provided file
+        printf '%s' "$WALLPAPER_PATH" > "$2"
+    else
+        # Use the default cache location if no custom file is provided
+        CHWAL_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/chwal"
+        # Ensure the cache directory exists
+        mkdir -p "$CHWAL_CACHE_HOME"
+        # Save to the cache
+        printf '%s' "$2" > "$CHWAL_CACHE_HOME/cache"
+    fi
+}
+
+# Function to run the pre/post hook scripts if specified
+_chwal_run_hook() {
+    if [ -n "$1" ] && [ -x "$1" ]; then
+        # Execute the hook script with the given arguments
+        "$1" "$2" "$3"
+    else
+        # Error if hook script is invalid
+        _chwal_error "Error: Hook script not found or not executable: $1" '2'
+    fi
+}
+
+# Function to check if the required commands are installed
+_chwal_check_requirements() {
+    # Check if wallust is installed
     if ! command -v wallust > /dev/null 2>&1; then
-        printf 'Error: Required program %s not found.\n' "wallust" >&2
-        exit 1
+        # Error if wallust is not found
+        _chwal_error "required program not found: wallust" '127'
     fi
+}
 
-    # Define default directories
-    WALLPAPER_DIR='/usr/share/backgrounds'
-    CHWAL_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/chwal"
-    WALLUST_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/wallust"
-    WALLPAPER_PATH="$WALLUST_CACHE_HOME/path"
-    MKWAL_FILE="$CHWAL_CACHE_HOME/marks.txt"
-    mkdir -p "$CHWAL_CACHE_HOME"
-
+# Function to parse command-line arguments
+_chwal_parse_args() {
     # Initialize flags
-    SHOW_VERSION=0
-    SHOW_HELP=0
-    RUN_LDWAL=0
-    RUN_MKWAL=0
+    VERSION=0
+    HELP=0
+    PRELOAD=0
+    MARK=0
+    WALLPAPER_DIR=""
+    PRE_HOOK=""
+    POST_HOOK=""
 
-    # Process args
+    # Parse the arguments
     while [ $# -gt 0 ]; do
         case "$1" in
-            -d | --dir | --directory)
-                WALLPAPER_DIR="$2"
-                shift 2
-                ;;
             -h | --help)
-                SHOW_HELP=1
+                HELP=1
                 shift
                 ;;
             -l | --load)
-                RUN_LDWAL=1
+                PRELOAD=1
                 shift
                 ;;
             -m | --mark)
-                RUN_MKWAL=1
+                MARK=1
                 shift
                 ;;
             -V | --version)
-                SHOW_VERSION=1
+                VERSION=1
                 shift
                 ;;
+            -d | --dir | --directory)
+                if [ -z "$2" ]; then
+                    _chwal_error "missing argument for: $1" '2'
+                fi
+                WALLPAPER_DIR="$2"
+                shift 2
+                ;;
             -p | --pre | --pre-hook)
+                if [ -z "$2" ]; then
+                    _chwal_error "missing argument for: $1" '2'
+                fi
                 PRE_HOOK="$2"
                 shift 2
                 ;;
             -P | --post | --post-hook)
+                if [ -z "$2" ]; then
+                    _chwal_error "missing argument for: $1" '2'
+                fi
                 POST_HOOK="$2"
                 shift 2
                 ;;
             *)
-                printf "Error: Invalid option %s\n" "$1" >&2
-                _chwal_help
-                exit 2
+                _chwal_error "invalid option: $1" '2'
+                HELP=1
+                return 2
                 ;;
         esac
     done
 
-    # Process flags
-    if [ "$SHOW_HELP" -eq 1 ]; then
-        _chwal_help
+    # Return parsed values
+    printf '%i %i %i %i %s %s %s' "$VERSION" "$HELP" "$PRELOAD" "$MARK" \
+        "$WALLPAPER_DIR" "$PRE_HOOK" "$POST_HOOK"
+}
+
+# Function to dispatch the various actions based on parsed arguments
+_chwal_dispatch() {
+    # Save and split using IFS
+    old_ifs=$IFS
+    IFS=' '
+    # shellcheck disable=SC2086
+    set -- $1
+    IFS=$old_ifs
+
+    # Assign by position
+    VERSION=$1
+    HELP=$2
+    PRELOAD=$3
+    MARK=$4
+    WALLPAPER_DIR=$5
+    PRE_HOOK=$6
+    POST_HOOK=$7
+
+    # Ensure WALLPAPER_DIR is not empty
+    if [ -z "$WALLPAPER_DIR" ]; then
+        WALLPAPER_DIR="/usr/share/backgrounds"
     fi
 
-    if [ "$SHOW_VERSION" -eq 1 ]; then
+    # Show version if requested
+    if [ "$VERSION" -eq 1 ]; then
         _chwal_version
     fi
 
-    # Check if wallpaper directory exists, if not abort
-    if [ ! -d "$WALLPAPER_DIR" ]; then
-        printf 'Error: Wallpaper directory %s could not be found.' "$WALLPAPER_DIR" >&2
-        exit 1
+    # Show help if requested
+    if [ "$HELP" -eq 1 ]; then
+        _chwal_help
     fi
 
-    if [ "$RUN_MKWAL" -eq 1 ]; then
-        _chwal_mkwal
+    # Run mark mode
+    if [ "$MARK" -eq 1 ]; then
+        _chwal_mark_wallpaper "$WALLPAPER_PATH" "$MKWAL_FILE"
     fi
 
-    if [ "$SHOW_HELP" -eq 0 ] && [ "$SHOW_VERSION" -eq 0 ] \
-        && [ "$RUN_LDWAL" -eq 0 ] && [ "$RUN_MKWAL" -eq 0 ]; then
-        _chwal_chwal
+    # Run preload mode
+    if [ "$PRELOAD" -eq 1 ]; then
+        _chwal_load_wallpapers "$WALLPAPER_DIR"
     fi
 
-    if [ "$RUN_LDWAL" -eq 1 ]; then
-        _chwal_ldwal
+    # If none of the flags are set (all flags are '0'), perform the default behavior
+    if [ "$VERSION" -ne 1 ] && [ "$HELP" -ne 1 ] && [ "$MARK" -ne 1 ] && [ "$PRELOAD" -ne 1 ]; then
+        CHWAL_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/chwal"
+        _chwal_change_wallpaper "$WALLPAPER_DIR" "$CHWAL_CACHE_HOME/cache"
     fi
-
-    exit 0
 }
 
+# Main function that orchestrates the script execution
+_chwal_main() {
+    # Check for required dependencies
+    _chwal_check_requirements || exit 1
+
+    # Parse arguments and get values for later use
+    result=$(_chwal_parse_args "$@")
+    set -- "$result"
+
+    # Dispatch the appropriate action based on parsed arguments
+    _chwal_dispatch "$@"
+}
+
+# Start the script by calling the main function
 _chwal_main "$@"
